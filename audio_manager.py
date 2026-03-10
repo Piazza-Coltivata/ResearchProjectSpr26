@@ -1,7 +1,6 @@
 import time
 import threading
 import subprocess
-import pulsectl
 
 
 class AudioManager:
@@ -11,8 +10,55 @@ class AudioManager:
         self._cycling = False
         self._cycle_thread = None
 
-    def _pulse(self):
-        return pulsectl.Pulse("bt-audio-router")
+    def _pactl(self, *args):
+        """Run a pactl command and return stdout."""
+        result = subprocess.run(
+            ["pactl"] + list(args),
+            capture_output=True, text=True
+        )
+        return result
+
+    def _parse_sinks(self):
+        """Parse pactl list sinks into a list of dicts with index, name, description."""
+        result = self._pactl("list", "sinks")
+        if result.returncode != 0:
+            return []
+        sinks = []
+        current = {}
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Sink #"):
+                if current:
+                    sinks.append(current)
+                current = {"index": line.split("#")[1]}
+            elif line.startswith("Name:"):
+                current["name"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Description:"):
+                current["description"] = line.split(":", 1)[1].strip()
+        if current:
+            sinks.append(current)
+        return sinks
+
+    def _parse_sources(self):
+        """Parse pactl list sources into a list of dicts with index, name, description."""
+        result = self._pactl("list", "sources")
+        if result.returncode != 0:
+            return []
+        sources = []
+        current = {}
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Source #"):
+                if current:
+                    sources.append(current)
+                current = {"index": line.split("#")[1]}
+            elif line.startswith("Name:"):
+                current["name"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Description:"):
+                current["description"] = line.split(":", 1)[1].strip()
+        if current:
+            sources.append(current)
+        return sources
 
     def setup(self):
         print("Setting up audio routing...")
@@ -24,19 +70,8 @@ class AudioManager:
         time.sleep(2)
 
         print("   Loading Bluetooth audio modules...")
-        with self._pulse() as pulse:
-            try:
-                pulse.module_load("module-bluetooth-discover")
-            except pulsectl.PulseOperationFailed:
-                pass
-            try:
-                pulse.module_load("module-bluetooth-policy")
-            except pulsectl.PulseOperationFailed:
-                pass
-            try:
-                pulse.module_load("module-switch-on-connect")
-            except pulsectl.PulseOperationFailed:
-                pass
+        for module in ["module-bluetooth-discover", "module-bluetooth-policy", "module-switch-on-connect"]:
+            self._pactl("load-module", module)
 
         self._set_default_sink()
         self._print_available_devices()
@@ -45,13 +80,14 @@ class AudioManager:
     def _set_default_sink(self):
         if self.usb_audio_device != "default":
             try:
-                with self._pulse() as pulse:
-                    for sink in pulse.sink_list():
-                        if self.usb_audio_device in sink.description or self.usb_audio_device == sink.name:
-                            pulse.default_set(sink)
-                            print(f"Audio routing configured successfully. Default sink set to: '{sink.name}'")
-                            return
-                    print(f"ERROR: No sink matching '{self.usb_audio_device}' found.")
+                for sink in self._parse_sinks():
+                    desc = sink.get("description", "")
+                    name = sink.get("name", "")
+                    if self.usb_audio_device in desc or self.usb_audio_device == name:
+                        self._pactl("set-default-sink", name)
+                        print(f"Audio routing configured successfully. Default sink set to: '{name}'")
+                        return
+                print(f"ERROR: No sink matching '{self.usb_audio_device}' found.")
             except Exception as e:
                 print(f"ERROR: Failed to set default audio sink: {e}")
         else:
@@ -60,47 +96,36 @@ class AudioManager:
     def _print_available_devices(self):
         print("\nAvailable audio devices:")
         try:
-            with self._pulse() as pulse:
-                for sink in pulse.sink_list():
-                    print(f"   [sink] {sink.name} — {sink.description}")
-                for source in pulse.source_list():
-                    print(f"   [source] {source.name} — {source.description}")
+            for sink in self._parse_sinks():
+                print(f"   [sink] {sink.get('name', '?')} — {sink.get('description', '?')}")
+            for source in self._parse_sources():
+                print(f"   [source] {source.get('name', '?')} — {source.get('description', '?')}")
         except Exception as e:
             print(f"   Could not list devices: {e}")
 
     def get_sources(self):
         try:
-            with self._pulse() as pulse:
-                return [{"id": str(s.index), "name": s.name} for s in pulse.source_list()]
+            return [{"id": s["index"], "name": s["name"]} for s in self._parse_sources()]
         except Exception:
             return []
 
     def set_default_source(self, source_name):
         try:
-            with self._pulse() as pulse:
-                for source in pulse.source_list():
-                    if source.name == source_name:
-                        pulse.default_set(source)
-                        return True
-            return False
+            result = self._pactl("set-default-source", source_name)
+            return result.returncode == 0
         except Exception:
             return False
 
     def get_sinks(self):
         try:
-            with self._pulse() as pulse:
-                return [{"id": str(s.index), "name": s.name} for s in pulse.sink_list()]
+            return [{"id": s["index"], "name": s["name"]} for s in self._parse_sinks()]
         except Exception:
             return []
 
     def set_default_sink_by_name(self, sink_name):
         try:
-            with self._pulse() as pulse:
-                for sink in pulse.sink_list():
-                    if sink.name == sink_name:
-                        pulse.default_set(sink)
-                        return True
-            return False
+            result = self._pactl("set-default-sink", sink_name)
+            return result.returncode == 0
         except Exception:
             return False
 
@@ -156,12 +181,11 @@ class AudioManager:
     #     it as the default output."""
     #     formatted = bt_device_address.replace(":", "_")
     #     try:
-    #         with self._pulse() as pulse:
-    #             for sink in pulse.sink_list():
-    #                 if formatted in sink.name:
-    #                     pulse.default_set(sink)
-    #                     print(f"Bluetooth output set to: {sink.name}")
-    #                     return True
+    #         for sink in self._parse_sinks():
+    #             if formatted in sink.get("name", ""):
+    #                 self._pactl("set-default-sink", sink["name"])
+    #                 print(f"Bluetooth output set to: {sink['name']}")
+    #                 return True
     #         print(f"ERROR: No sink found for Bluetooth device {bt_device_address}")
     #         return False
     #     except Exception as e:
