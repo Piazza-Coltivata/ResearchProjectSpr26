@@ -53,7 +53,8 @@ class AudioRouterGUI:
         source_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.source_list = tk.Listbox(
             source_frame, font=("Courier", 10),
-            selectmode=tk.SINGLE, yscrollcommand=source_scroll.set
+            selectmode=tk.SINGLE, exportselection=False,
+            yscrollcommand=source_scroll.set
         )
         self.source_list.pack(fill=tk.BOTH, expand=True)
         source_scroll.config(command=self.source_list.yview)
@@ -71,7 +72,8 @@ class AudioRouterGUI:
         sink_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.sink_list = tk.Listbox(
             sink_frame, font=("Courier", 10),
-            selectmode=tk.SINGLE, yscrollcommand=sink_scroll.set
+            selectmode=tk.SINGLE, exportselection=False,
+            yscrollcommand=sink_scroll.set
         )
         self.sink_list.pack(fill=tk.BOTH, expand=True)
         sink_scroll.config(command=self.sink_list.yview)
