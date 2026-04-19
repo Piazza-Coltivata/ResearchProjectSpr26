@@ -71,14 +71,27 @@ class AudioManager:
         result = self._pactl("info")
         is_pipewire = "PipeWire" in result.stdout if result.returncode == 0 else False
 
+        # If pactl failed entirely, check if PipeWire is running via systemctl
+        if result.returncode != 0:
+            pw_check = subprocess.run(
+                ["pgrep", "-x", "pipewire"], capture_output=True
+            )
+            if pw_check.returncode == 0:
+                is_pipewire = True
+                print("   pactl info failed (likely a sudo/XDG_RUNTIME_DIR issue),")
+                print("   but PipeWire is running. Skipping PulseAudio steps.")
+
         if is_pipewire:
             print("   Detected PipeWire audio server — skipping PulseAudio restart and module loading.")
         else:
-            print("   Restarting PulseAudio to apply changes...")
-            subprocess.run(["pulseaudio", "-k"], capture_output=True)
-            time.sleep(1)
-            subprocess.run(["pulseaudio", "--start"], capture_output=True)
-            time.sleep(2)
+            print("   No PipeWire detected. Attempting PulseAudio restart...")
+            try:
+                subprocess.run(["pulseaudio", "-k"], capture_output=True)
+                time.sleep(1)
+                subprocess.run(["pulseaudio", "--start"], capture_output=True)
+                time.sleep(2)
+            except FileNotFoundError:
+                print("   WARNING: 'pulseaudio' binary not found. Skipping restart.")
 
             print("   Loading Bluetooth audio modules...")
             for module in ["module-bluetooth-discover", "module-bluetooth-policy", "module-switch-on-connect"]:
