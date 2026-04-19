@@ -30,6 +30,8 @@ import struct
 import sys
 import argparse
 import signal
+import os
+import glob
 
 
 # Default PCM format — matches PulseAudio/PipeWire defaults
@@ -39,6 +41,42 @@ DEFAULT_CHANNELS = 2
 BYTES_PER_SAMPLE = 2           # 16-bit = 2 bytes
 CHUNK_FRAMES = 1024            # frames per read chunk
 CHUNK_BYTES = CHUNK_FRAMES * DEFAULT_CHANNELS * BYTES_PER_SAMPLE  # 4096 bytes
+
+
+def _pulse_env():
+    """Return an env dict that lets pactl/parec/paplay reach the
+    PulseAudio or PipeWire-Pulse daemon even when running as root.
+
+    When invoked with sudo, PULSE_SERVER and XDG_RUNTIME_DIR are usually
+    unset, so pactl gets 'Connection refused'.  We look for the real
+    user's runtime dir and PipeWire-pulse / PulseAudio socket."""
+    env = os.environ.copy()
+    # Already set — nothing to fix
+    if env.get("PULSE_SERVER"):
+        return env
+    # If we're not root, defaults should work
+    if os.getuid() != 0:
+        return env
+
+    # Find the real (non-root) user's runtime dir
+    sudo_uid = os.environ.get("SUDO_UID")
+    if sudo_uid:
+        runtime_dir = f"/run/user/{sudo_uid}"
+    else:
+        # Fallback: pick the first /run/user/<uid> that exists (skip 0)
+        candidates = sorted(glob.glob("/run/user/[0-9]*"))
+        runtime_dir = next((d for d in candidates if not d.endswith("/0")), None)
+
+    if runtime_dir and os.path.isdir(runtime_dir):
+        env["XDG_RUNTIME_DIR"] = runtime_dir
+        # PipeWire-pulse socket
+        pw_socket = os.path.join(runtime_dir, "pipewire-0")
+        pulse_socket = os.path.join(runtime_dir, "pulse", "native")
+        if os.path.exists(pulse_socket):
+            env["PULSE_SERVER"] = f"unix:{pulse_socket}"
+        elif os.path.exists(pw_socket):
+            env["PULSE_SERVER"] = f"unix:{pw_socket}"
+    return env
 
 
 class CaptureStats:
@@ -180,7 +218,7 @@ class NullSinkManager:
                     "audio.position=[FL FR] "
                     "monitor.channel-volumes=true}"
                 ],
-                capture_output=True, text=True,
+                capture_output=True, text=True, env=_pulse_env(),
             )
             if result.returncode != 0:
                 print(f"ERROR: Failed to create null sink via pw-cli: {result.stderr.strip()}")
@@ -202,7 +240,7 @@ class NullSinkManager:
         if self._null_module_id:
             if self._pw_native:
                 subprocess.run(["pw-cli", "destroy", self._null_module_id],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, env=_pulse_env())
             else:
                 _pactl_internal("unload-module", self._null_module_id)
             print(f"Null sink removed (id {self._null_module_id})")
@@ -259,7 +297,7 @@ class NullSinkManager:
 
 def _pactl_internal(*args):
     """Internal pactl wrapper used by NullSinkManager (avoids circular dep with module-level _pactl)."""
-    return subprocess.run(["pactl"] + list(args), capture_output=True, text=True)
+    return subprocess.run(["pactl"] + list(args), capture_output=True, text=True, env=_pulse_env())
 
 
 class CapturePipeline:
@@ -311,6 +349,7 @@ class CapturePipeline:
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=_pulse_env(),
         )
 
         # Launch paplay (play to sink) reading from stdin
@@ -325,6 +364,7 @@ class CapturePipeline:
             ],
             stdin=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=_pulse_env(),
         )
 
         self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
@@ -400,6 +440,7 @@ class CapturePipeline:
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=_pulse_env(),
         )
         print(f"Source switched to: {new_source}")
 
@@ -432,6 +473,7 @@ class CapturePipeline:
             ],
             stdin=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=_pulse_env(),
         )
         print(f"Sink switched to: {new_sink}")
 
@@ -500,7 +542,7 @@ class CapturePipeline:
 # ---------------------------------------------------------------------------
 
 def _pactl(*args):
-    result = subprocess.run(["pactl"] + list(args), capture_output=True, text=True)
+    result = subprocess.run(["pactl"] + list(args), capture_output=True, text=True, env=_pulse_env())
     return result
 
 
