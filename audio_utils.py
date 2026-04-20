@@ -100,6 +100,14 @@ def get_bt_devices():
     Return a list of all connected Bluetooth devices (cards), active or not.
     For each device, it also finds the corresponding .monitor source if it exists.
     """
+    # 1. Get all sources and filter for BT monitor sources first
+    all_sources = list_devices("sources")
+    bt_monitor_sources = {
+        s['name'].split('.monitor')[0]: s 
+        for s in all_sources if "bluez" in s.get("name", "") and ".monitor" in s.get("name", "")
+    }
+
+    # 2. Get all BT cards
     cards_result = _pactl("list", "cards")
     if not cards_result:
         return []
@@ -110,10 +118,8 @@ def get_bt_devices():
         line = line.strip()
         if line.startswith("Card #"):
             if current_card and "bluez_card" in current_card.get("name", ""):
-                # Before adding, ensure it's in the right mode
-                if ensure_a2dp_sink(current_card["name"]):
-                    devices.append(current_card)
-            current_card = {}
+                devices.append(current_card)
+            current_card = {} # Reset for the new card
         elif line.startswith("Name:"):
             current_card["name"] = line.split("Name:", 1)[1].strip()
         elif line.startswith("Properties:"):
@@ -123,20 +129,26 @@ def get_bt_devices():
             current_card["properties"][key.strip()] = val.strip().strip('"')
 
     if current_card and "bluez_card" in current_card.get("name", ""):
-        if ensure_a2dp_sink(current_card["name"]):
-            devices.append(current_card)
+        devices.append(current_card)
 
-    # Now, find the monitor source for each device if it's active
-    all_sources = list_devices("sources")
+    # 3. Combine the data correctly
+    processed_devices = []
     for device in devices:
+        # Ensure it's a device we want to control
+        if not ensure_a2dp_sink(device["name"]):
+            continue
+
         device_mac = device.get("properties", {}).get("device.string", "").replace("_", ":")
         device["description"] = device.get("properties", {}).get("device.alias", f"BT Device {device_mac}")
         
-        # Find the corresponding monitor source
-        monitor_source = next(
-            (s for s in all_sources if device_mac in s.get("name", "") and ".monitor" in s.get("name", "")),
+        # Find the corresponding monitor source from our pre-filtered list
+        # We match the card name (e.g., bluez_card.XX_XX...) with the start of the monitor name
+        matching_source = next(
+            (bt_monitor_sources[key] for key in bt_monitor_sources if device["name"] in key),
             None
         )
-        device["monitor_source_name"] = monitor_source["name"] if monitor_source else None
+        
+        device["monitor_source_name"] = matching_source["name"] if matching_source else None
+        processed_devices.append(device)
 
-    return devices
+    return processed_devices
