@@ -4,14 +4,25 @@ PulseAudio/PipeWire utility functions for listing and managing audio devices.
 import subprocess
 
 def _pactl(*args):
-    """Run a pactl command and return the result."""
+    """Run a pactl command and return the result, with enhanced logging."""
+    command = ["pactl"] + list(args)
+    print(f"DEBUG: Running command -> {' '.join(command)}")
     try:
-        return subprocess.run(
-            ["pactl"] + list(args),
+        result = subprocess.run(
+            command,
             capture_output=True, text=True, check=True
         )
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"pactl command failed: {e}")
+        # print(f"DEBUG: pactl stdout: {result.stdout.strip()}")
+        return result
+    except FileNotFoundError:
+        print("DEBUG: ERROR - 'pactl' command not found. Is it installed and in your PATH?")
+        return None
+    except subprocess.CalledProcessError as e:
+        print(f"DEBUG: ERROR - pactl command failed with exit code {e.returncode}.")
+        print(f"DEBUG: stderr: {e.stderr.strip()}")
+        return None
+    except Exception as e:
+        print(f"DEBUG: An unexpected error occurred with pactl: {e}")
         return None
 
 def list_devices(dev_type="sinks"):
