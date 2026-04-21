@@ -7,9 +7,10 @@ import time
 import collections
 import audio_utils
 
-# Open a file to capture stderr from subprocesses
-# The 'w' mode means it's overwritten each time the app starts
-error_log_file = open("pipeline_errors.log", "w")
+# Open a file to capture stderr from subprocesses.
+# AudioSwitch clears the session log explicitly; append mode avoids later writes
+# from this module clobbering activation diagnostics.
+error_log_file = open("pipeline_errors.log", "a")
 
 
 def _source_name_to_card(source_name):

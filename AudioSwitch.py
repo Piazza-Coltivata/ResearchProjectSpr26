@@ -3,7 +3,7 @@ from tkinter import ttk
 import subprocess
 import threading
 import time
-from audio_utils import list_devices, get_bt_devices, ensure_a2dp_sink, activate_bt_source_cards, deactivate_bt_source_cards, _extract_mac, _normalize_mac
+from audio_utils import list_devices, get_bt_devices, ensure_a2dp_sink, ensure_a2dp_source, activate_bt_source_cards, deactivate_bt_source_cards, _extract_mac, _normalize_mac
 from capture import CapturePipeline, NullSinkManager, check_active_links
 
 class MultiPhoneSwitcher(tk.Tk):
@@ -101,10 +101,12 @@ class MultiPhoneSwitcher(tk.Tk):
         if not source_name:
             card_name = selected_device.get('name', '')
             if card_name.startswith('bluez_card.'):
-                subprocess.run(
-                    ["pactl", "set-card-profile", card_name, "a2dp-source"],
-                    capture_output=True, text=True,
-                )
+                if not ensure_a2dp_source(card_name, log_file="pipeline_errors.log"):
+                    self.status_label.config(
+                        text=f"Could not activate {choice}. See pipeline_errors.log.",
+                        foreground="orange",
+                    )
+                    return
             self.status_label.config(text=f"Activating {choice}...", foreground="yellow")
             self.update_idletasks()
             for _ in range(5):
@@ -215,10 +217,15 @@ class MultiPhoneSwitcher(tk.Tk):
             if card_name.startswith('bluez_card.'):
                 self.status_label.config(text=f"Activating {initial_device['description']}...", foreground="yellow")
                 self.update_idletasks()
-                subprocess.run(
-                    ["pactl", "set-card-profile", card_name, "a2dp-source"],
-                    capture_output=True, text=True,
-                )
+                if not ensure_a2dp_source(card_name, log_file="pipeline_errors.log"):
+                    self.status_label.config(
+                        text=f"Could not activate {initial_device['description']}. See pipeline_errors.log.",
+                        foreground="orange",
+                    )
+                    print(
+                        f"HUB_DEBUG: ERROR - Could not set a valid A2DP source profile for {card_name}."
+                    )
+                    return
                 for _ in range(5):
                     time.sleep(1)
                     fresh = get_bt_devices()

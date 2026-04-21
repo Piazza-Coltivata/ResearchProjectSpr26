@@ -79,6 +79,44 @@ def _extract_mac(name):
 
     return _normalize_mac(suffix.split(".", 1)[0])
 
+def _normalize_profile_name(value):
+    """Normalize PulseAudio/PipeWire profile names for comparison."""
+    return (value or "").strip().replace("_", "-")
+
+def _profile_matches(profile_name, desired_profile):
+    """Return True when a profile matches a base role, including codec suffixes."""
+    normalized_profile = _normalize_profile_name(profile_name)
+    normalized_desired = _normalize_profile_name(desired_profile)
+    return (
+        normalized_profile == normalized_desired
+        or normalized_profile.startswith(f"{normalized_desired}-")
+    )
+
+def _choose_card_profile(card, desired_profile):
+    """Pick the best available profile on a card for the requested BT role."""
+    active_profile = card.get("active_profile", "")
+    if _profile_matches(active_profile, desired_profile):
+        return active_profile
+
+    matching_profiles = [
+        profile for profile in card.get("profiles", [])
+        if _profile_matches(profile.get("name", ""), desired_profile)
+    ]
+    if not matching_profiles:
+        return None
+
+    def _profile_rank(profile):
+        availability = (profile.get("available") or "").lower()
+        normalized_name = _normalize_profile_name(profile.get("name", ""))
+        normalized_desired = _normalize_profile_name(desired_profile)
+        return (
+            0 if availability == "yes" else 1 if availability in ("", "unknown") else 2,
+            0 if normalized_name == normalized_desired else 1,
+            normalized_name,
+        )
+
+    return sorted(matching_profiles, key=_profile_rank)[0].get("name")
+
 def _list_bt_cards():
     """Return Bluetooth card objects from pactl."""
     cards_result = _pactl("list", "cards")
@@ -87,29 +125,56 @@ def _list_bt_cards():
 
     cards = []
     all_card_names = []
-    current_card = {}
+    current_card = None
+    current_section = None
+
+    def finalize_current_card(card):
+        if not card:
+            return
+        card.setdefault("properties", {})
+        card.setdefault("profiles", [])
+        card.setdefault("active_profile", "")
+        name = card.get("name", "")
+        all_card_names.append(name)
+        if "bluez_card" in name:
+            cards.append(card)
+
     for raw_line in cards_result.stdout.splitlines():
         line = raw_line.strip()
         if line.startswith("Card #"):
-            if current_card:
-                name = current_card.get("name", "")
-                all_card_names.append(name)
-                if "bluez_card" in name:
-                    cards.append(current_card)
+            finalize_current_card(current_card)
             current_card = {}
+            current_section = None
         elif line.startswith("Name:"):
             current_card["name"] = line.split("Name:", 1)[1].strip()
+            current_section = None
         elif line.startswith("Properties:"):
             current_card["properties"] = {}
-        elif current_card and "properties" in current_card and "=" in line:
+            current_section = "properties"
+        elif line.startswith("Profiles:"):
+            current_card["profiles"] = []
+            current_section = "profiles"
+        elif line.startswith("Active Profile:"):
+            current_card["active_profile"] = line.split("Active Profile:", 1)[1].strip()
+            current_section = None
+        elif line.startswith(("Ports:", "Active Port:")):
+            current_section = None
+        elif current_section == "properties" and current_card and "=" in line:
             key, val = line.split("=", 1)
             current_card["properties"][key.strip()] = val.strip().strip('"')
+        elif current_section == "profiles" and current_card and ":" in line:
+            profile_name, profile_details = line.split(":", 1)
+            profile_name = profile_name.strip()
+            if profile_name:
+                availability = ""
+                if "available:" in profile_details:
+                    availability = profile_details.rsplit("available:", 1)[1].rstrip(")").strip()
+                current_card["profiles"].append({
+                    "name": profile_name,
+                    "available": availability,
+                })
 
-    if current_card:
-        name = current_card.get("name", "")
-        all_card_names.append(name)
-        if "bluez_card" in name:
-            cards.append(current_card)
+    finalize_current_card(current_card)
 
     print(f"BT_CARDS: all cards found: {all_card_names}")
     return cards
@@ -174,46 +239,123 @@ def _build_bt_description(source, card, device_mac):
         return f"{fallback} ({device_mac})" if device_mac else fallback
     return f"BT Device {device_mac}" if device_mac else "BT Device"
 
-def ensure_a2dp_sink(card_name):
-    """
-    Checks if a card has an 'a2dp-sink' profile and sets it if not active.
-    Returns True if the card is ready, False otherwise.
-    """
-    card_info = _pactl("list", "cards")
-    if not card_info:
+def _format_card_profiles(card):
+    """Render a card's available profile names and availability for logs."""
+    profiles = card.get("profiles", [])
+    if not profiles:
+        return "[none]"
+    return ", ".join(
+        f"{profile.get('name')} [{profile.get('available') or 'unknown'}]"
+        for profile in profiles
+        if profile.get("name")
+    )
+
+def _append_to_log_file(log_file, content):
+    """Append debug information to the shared pipeline log."""
+    if not log_file or not content:
+        return
+    try:
+        with open(log_file, "a") as log_handle:
+            log_handle.write(content)
+    except IOError as error:
+        print(f"Error writing to log file {log_file}: {error}")
+
+def _ensure_card_profile(card, desired_profile, log_file=None, action_label="PROFILE"):
+    """Ensure a BT card is using the best matching available profile."""
+    card_name = card.get("name", "")
+    active_profile = card.get("active_profile", "")
+    target_profile = _choose_card_profile(card, desired_profile)
+    desired_label = _normalize_profile_name(desired_profile)
+    log_lines = [
+        f"{action_label}: {card_name}\n",
+        f"  Active Profile: {active_profile or '[none]'}\n",
+        f"  Available Profiles: {_format_card_profiles(card)}\n",
+        f"  Selected Target Profile: {target_profile or '[none]'}\n",
+    ]
+
+    if not target_profile:
+        log_lines.append(f"  Result: no matching {desired_label} profile was found.\n\n")
+        _append_to_log_file(log_file, "".join(log_lines))
+        print(
+            f"{action_label}: {card_name} has no matching {desired_label} profile. "
+            f"Profiles: {_format_card_profiles(card)}"
+        )
         return False
 
-    in_card_section = False
-    active_profile = ""
-    has_a2dp_sink = False
+    if _profile_matches(active_profile, desired_profile):
+        log_lines.append("  Result: already active.\n\n")
+        _append_to_log_file(log_file, "".join(log_lines))
+        print(f"{action_label}: {card_name} already using {active_profile}.")
+        return True
 
-    for line in card_info.stdout.splitlines():
-        line = line.strip()
-        if f"Name: {card_name}" in line:
-            in_card_section = True
-            continue
-        
-        if in_card_section:
-            if line.startswith("Card #"): # Reached the next card
-                break
-            if "a2dp-sink" in line:
-                has_a2dp_sink = True
-            if line.startswith("Active Profile:") and "a2dp-sink" in line:
-                # Already in the correct mode
-                return True
-    
-    if in_card_section and has_a2dp_sink:
-        print(f"Card '{card_name}' is not in a2dp-sink mode. Attempting to set it...")
-        result = _pactl("set-card-profile", card_name, "a2dp-sink")
-        if result and result.returncode == 0:
-            print("Successfully set profile to a2dp-sink.")
-            time.sleep(1) # Give the system a moment to apply the change
-            return True
-        else:
-            print(f"Failed to set profile for '{card_name}'.")
-            return False
-    
+    command = ["pactl", "set-card-profile", card_name, target_profile]
+    log_lines.append(f"  Command: {' '.join(command)}\n")
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        log_lines.append("  Result: command timed out.\n\n")
+        _append_to_log_file(log_file, "".join(log_lines))
+        print(f"{action_label}: Timed out while setting {card_name} to {target_profile}.")
+        return False
+    except Exception as error:
+        log_lines.append(f"  Exception: {error}\n  Result: failed.\n\n")
+        _append_to_log_file(log_file, "".join(log_lines))
+        print(f"{action_label}: Exception while setting {card_name}: {error}")
+        return False
+
+    log_lines.extend([
+        f"  Return Code: {result.returncode}\n",
+        f"  Stdout: {result.stdout.strip()}\n",
+        f"  Stderr: {result.stderr.strip()}\n",
+        "  Result: success.\n\n" if result.returncode == 0 else "  Result: failed.\n\n",
+    ])
+    _append_to_log_file(log_file, "".join(log_lines))
+
+    if result.returncode == 0:
+        print(f"{action_label}: Successfully set {card_name} to {target_profile}.")
+        return True
+
+    print(f"{action_label}: Failed to set {card_name} to {target_profile}.")
     return False
+
+def ensure_a2dp_sink(card_name):
+    """
+    Checks if a card has an A2DP sink profile and sets the best match if needed.
+    Returns True if the card is ready, False otherwise.
+    """
+    card = next((card for card in _list_bt_cards() if card.get("name") == card_name), None)
+    if not card:
+        print(f"Card '{card_name}' was not found in 'pactl list cards'.")
+        return False
+
+    if _ensure_card_profile(card, "a2dp-sink", action_label="ENSURE_A2DP_SINK"):
+        time.sleep(1)
+        return True
+    return False
+
+def ensure_a2dp_source(card_name, log_file=None):
+    """Ensure a BT source card is using its best available A2DP source profile."""
+    card = next((card for card in _list_bt_cards() if card.get("name") == card_name), None)
+    if not card:
+        _append_to_log_file(
+            log_file,
+            f"ENSURE_A2DP_SOURCE: {card_name}\n  Result: card not found in pactl list cards.\n\n",
+        )
+        print(f"ENSURE_A2DP_SOURCE: Card '{card_name}' was not found.")
+        return False
+
+    return _ensure_card_profile(
+        card,
+        "a2dp-source",
+        log_file=log_file,
+        action_label="ENSURE_A2DP_SOURCE",
+    )
 
 
 def get_bt_devices():
@@ -274,6 +416,12 @@ def get_bt_devices():
     for device_mac, card in cards_by_mac.items():
         if device_mac in seen_macs or device_mac in bt_output_sink_macs:
             continue
+        if not _choose_card_profile(card, "a2dp-source"):
+            print(
+                f"BT_DISCOVERY: skipping {card.get('name')} because it has no "
+                f"A2DP source profile."
+            )
+            continue
         idle_description = _build_bt_description({}, card, device_mac)
         processed_devices.append({
             "name": card.get("name"),
@@ -301,17 +449,17 @@ def get_bt_devices():
 
 def activate_bt_source_cards(exclude_macs=None, log_file=None):
     """
-    Set all BT phone cards to 'a2dp-source' profile, skipping any whose MAC
-    is in exclude_macs (typically the speaker). Called on startup to wake up
-    phones that were set to 'off' on the last close, and before hub start.
-    Returns the count of cards successfully activated.
+    Set all BT phone cards to their best matching A2DP source profile,
+    skipping any whose MAC is in exclude_macs (typically the speaker).
+    Called on startup to wake up phones that were set to 'off' on the last
+    close, and before hub start. Returns the count of cards that are ready.
     """
     if exclude_macs is None:
         exclude_macs = set()
     exclude_macs = {_normalize_mac(m) for m in exclude_macs}
 
     activated = 0
-    log_content = "--- Activating BT Source Cards ---\n"
+    _append_to_log_file(log_file, "--- Activating BT Source Cards ---\n")
 
     for card in _list_bt_cards():
         card_name = card.get("name", "")
@@ -320,38 +468,17 @@ def activate_bt_source_cards(exclude_macs=None, log_file=None):
         ) or _extract_mac(card_name)
         
         if card_mac in exclude_macs:
-            log_content += f"ACTIVATE: Skipping {card_name} (identified as speaker)\n"
-            continue
-
-        command = ["pactl", "set-card-profile", card_name, "a2dp-source"]
-        try:
-            result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=5)
-            log_entry = (
-                f"Attempted to activate card: {card_name} (MAC: {card_mac})\n"
-                f"  Command: {' '.join(command)}\n"
-                f"  Return Code: {result.returncode}\n"
-                f"  Stdout: {result.stdout.strip()}\n"
-                f"  Stderr: {result.stderr.strip()}\n\n"
+            _append_to_log_file(
+                log_file,
+                f"ACTIVATE: Skipping {card_name} (identified as speaker)\n",
             )
-            log_content += log_entry
-            if result.returncode == 0:
-                print(f"ACTIVATE: Successfully set {card_name} to a2dp-source.")
-                activated += 1
-            else:
-                print(f"ACTIVATE: Failed to set {card_name} to a2dp-source. See '{log_file}' for details.")
-        except subprocess.TimeoutExpired:
-            log_content += f"Timeout expired while activating {card_name}.\n\n"
-            print(f"Timeout trying to activate {card_name}.")
-        except Exception as e:
-            log_content += f"Exception while activating {card_name}: {e}\n\n"
-            print(f"An exception occurred while trying to activate {card_name}.")
-
-    if log_file:
-        try:
-            with open(log_file, "a") as f:
-                f.write(log_content)
-        except IOError as e:
-            print(f"Error writing to log file {log_file}: {e}")
+            continue
+        _append_to_log_file(
+            log_file,
+            f"Attempted to activate card: {card_name} (MAC: {card_mac})\n",
+        )
+        if _ensure_card_profile(card, "a2dp-source", log_file=log_file, action_label="ACTIVATE"):
+            activated += 1
             
     return activated
 
