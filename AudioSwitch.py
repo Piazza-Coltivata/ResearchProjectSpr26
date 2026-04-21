@@ -89,6 +89,10 @@ class MultiPhoneSwitcher(tk.Tk):
             selected_device = next((dev for dev in self.bt_devices if dev['description'] == choice), None)
             if selected_device and selected_device.get('source_name'):
                 if self.capture_pipeline.switch_source(selected_device['source_name']):
+                    self.null_sink_manager.set_active_source(
+                        selected_device.get('source_name'),
+                        selected_device.get('device_mac'),
+                    )
                     self.status_label.config(text=f"Switched to {choice}", foreground="green")
                 else:
                     error = self.capture_pipeline.last_error or f"Could not switch to {choice}."
@@ -153,6 +157,10 @@ class MultiPhoneSwitcher(tk.Tk):
             return
 
         self.capture_pipeline = pipeline
+        self.null_sink_manager.set_active_source(
+            initial_device.get('source_name'),
+            initial_device.get('device_mac'),
+        )
         null_sink_ready = self.null_sink_manager.setup()
 
         self.start_stop_btn.config(text="Stop Hub")

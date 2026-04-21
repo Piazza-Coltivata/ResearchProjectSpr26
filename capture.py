@@ -225,6 +225,29 @@ class NullSinkManager:
         self._monitor_thread = None
         self._monitoring = False
         self.stop_event = threading.Event()
+        self._preserved_tokens = set()
+
+    def set_active_source(self, source_name=None, device_mac=None):
+        """Remember identifiers for the Bluetooth stream that should keep playing."""
+        tokens = set()
+        if source_name:
+            lowered = source_name.lower()
+            tokens.add(lowered)
+            tokens.add(lowered.replace(":", "_"))
+            tokens.add(lowered.replace("_", ":"))
+        if device_mac:
+            lowered_mac = device_mac.lower()
+            tokens.add(lowered_mac)
+            tokens.add(lowered_mac.replace(":", "_"))
+            tokens.add(lowered_mac.replace(":", "-"))
+        self._preserved_tokens = {token for token in tokens if token}
+
+    def _should_preserve_block(self, block):
+        """True when the sink-input block belongs to the selected Bluetooth source."""
+        if not self._preserved_tokens:
+            return False
+        block_text = block.lower()
+        return any(token in block_text for token in self._preserved_tokens)
 
     def setup(self):
         """Creates the null sink."""
@@ -301,6 +324,8 @@ class NullSinkManager:
             try:
                 for block in self._list_sink_input_blocks():
                     if "bluez" not in block.lower():
+                        continue
+                    if self._should_preserve_block(block):
                         continue
                     stream_id = block.splitlines()[0].split("#", 1)[1].strip()
                     subprocess.run(
