@@ -250,106 +250,87 @@ class NullSinkManager:
         return any(token in block_text for token in self._preserved_tokens)
 
     def setup(self):
-        """Creates the null sink."""
-        self.teardown() # Clean up any old instance
+        """Creates the null sink module if not already present."""
+        self.teardown()
         result = subprocess.run(
-            ["pactl", "load-module", "module-null-sink", f"sink_name={self.NULL_SINK_NAME}"],
+            ["pactl", "load-module", "module-null-sink",
+             f"sink_name={self.NULL_SINK_NAME}",
+             f"sink_properties=device.description='{self.NULL_SINK_NAME}'"],
             capture_output=True, text=True
         )
         if result.returncode == 0:
             self._module_id = result.stdout.strip()
             print(f"Null sink created (module {self._module_id}).")
-            self.start_monitoring()
             return True
         print(f"Error creating null sink: {result.stderr}")
         return False
 
     def teardown(self):
         """Removes the null sink."""
-        self.stop_monitoring()
         if self._module_id:
-            subprocess.run(["pactl", "unload-module", self._module_id])
+            subprocess.run(["pactl", "unload-module", self._module_id],
+                           capture_output=True, text=True)
             print("Null sink removed.")
             self._module_id = None
-        # Also find and remove by name if it's stuck
-        sinks_result = subprocess.run(["pactl", "list", "short", "modules"], capture_output=True, text=True)
+        # Also sweep for any stale instance left from a previous run.
+        sinks_result = subprocess.run(
+            ["pactl", "list", "short", "modules"],
+            capture_output=True, text=True
+        )
         for line in sinks_result.stdout.splitlines():
             if self.NULL_SINK_NAME in line:
                 mod_id = line.split()[0]
-                subprocess.run(["pactl", "unload-module", mod_id])
+                subprocess.run(["pactl", "unload-module", mod_id],
+                               capture_output=True, text=True)
                 print(f"Found and removed stale null sink (module {mod_id}).")
 
+    def silence_sources(self, source_names, active_source_name):
+        """
+        Route non-active BT sources to the null sink using pw-link at the
+        PipeWire graph level, and disconnect them from all other sinks.
+        The active source is left untouched.
+        """
+        if not self._module_id:
+            return
 
-    def start_monitoring(self):
-        """Starts a thread to automatically move all BT streams to the null sink."""
-        self._monitoring = True
-        self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
-        self._monitor_thread.start()
-
-    def stop_monitoring(self):
-        self._monitoring = False
-        if self._monitor_thread:
-            self._monitor_thread.join(timeout=2)
-
-    def _list_sink_input_blocks(self):
-        """Split `pactl list sink-inputs` output into per-stream blocks."""
         try:
-            result = subprocess.run(
-                ["pactl", "list", "sink-inputs"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            return []
+            result = subprocess.run(["pw-link", "-iol"],
+                                    capture_output=True, text=True, check=True)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            return
 
-        blocks = []
-        current_block = []
-        for line in result.stdout.splitlines():
-            if line.startswith("Sink Input #"):
-                if current_block:
-                    blocks.append("\n".join(current_block))
-                current_block = [line]
-            elif current_block:
-                current_block.append(line)
+        ports = set()
+        for raw_line in result.stdout.splitlines():
+            line = raw_line.strip()
+            if line and not line.startswith("|") and " (" not in line and ":" in line:
+                ports.add(line)
 
-        if current_block:
-            blocks.append("\n".join(current_block))
+        null_sink_left  = f"{self.NULL_SINK_NAME}:playback_FL"
+        null_sink_right = f"{self.NULL_SINK_NAME}:playback_FR"
+        if null_sink_left not in ports:
+            return
 
-        return blocks
-
-    def _monitor_loop(self):
-        """Periodically moves any new Bluetooth audio streams to the null sink."""
-        while self._monitoring:
-            try:
-                for block in self._list_sink_input_blocks():
-                    if "bluez" not in block.lower():
-                        continue
-                    if self._should_preserve_block(block):
-                        continue
-                    stream_id = block.splitlines()[0].split("#", 1)[1].strip()
-                    subprocess.run(
-                        ["pactl", "move-sink-input", stream_id, self.NULL_SINK_NAME],
-                        capture_output=True,
-                        text=True,
-                    )
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                pass # pactl might fail if no streams exist
-            time.sleep(2)
-
-    def _move_new_streams(self):
-        """Check for new sink-inputs and move them if they are not our playback stream."""
-        while not self.stop_event.is_set():
-            sink_inputs = audio_utils.list_devices("sink-inputs")
-            for si in sink_inputs:
-                # Check if it's a BT stream AND not our special playback stream
-                is_bt_stream = "bluez" in si.get("properties", {}).get("media.role", "") or \
-                               "bluez" in si.get("properties", {}).get("node.name", "")
-                is_our_playback = si.get("properties", {}).get("application.name", "") == "BT_HUB_PLAYBACK"
-
-                if is_bt_stream and not is_our_playback:
-                    if si.get("sink") != self.null_sink_index:
-                        print(f"Moving new stream {si['index']} to null sink.")
-                        audio_utils.move_sink_input(si["index"], self.null_sink_index)
-            
-            time.sleep(self.monitor_interval)
+        for source_name in source_names:
+            if source_name == active_source_name:
+                continue
+            for left_s, right_s in (("output_FL", "output_FR"),
+                                    ("monitor_FL", "monitor_FR"),
+                                    ("capture_FL", "capture_FR")):
+                src_left  = f"{source_name}:{left_s}"
+                src_right = f"{source_name}:{right_s}"
+                if src_left in ports and src_right in ports:
+                    subprocess.run(["pw-link", src_left,  null_sink_left],
+                                   capture_output=True, text=True)
+                    subprocess.run(["pw-link", src_right, null_sink_right],
+                                   capture_output=True, text=True)
+                    print(f"Silenced {source_name} → null sink")
+                    break
+            for mono_s in ("output_MONO", "monitor_MONO", "capture_MONO"):
+                src_mono = f"{source_name}:{mono_s}"
+                if src_mono in ports:
+                    subprocess.run(["pw-link", src_mono, null_sink_left],
+                                   capture_output=True, text=True)
+                    subprocess.run(["pw-link", src_mono, null_sink_right],
+                                   capture_output=True, text=True)
+                    print(f"Silenced (mono) {source_name} → null sink")
+                    break

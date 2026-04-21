@@ -89,9 +89,13 @@ class MultiPhoneSwitcher(tk.Tk):
             selected_device = next((dev for dev in self.bt_devices if dev['description'] == choice), None)
             if selected_device and selected_device.get('source_name'):
                 if self.capture_pipeline.switch_source(selected_device['source_name']):
-                    self.null_sink_manager.set_active_source(
+                    all_source_names = [
+                        dev.get('source_name') for dev in self.bt_devices
+                        if dev.get('source_name')
+                    ]
+                    self.null_sink_manager.silence_sources(
+                        all_source_names,
                         selected_device.get('source_name'),
-                        selected_device.get('device_mac'),
                     )
                     self.status_label.config(text=f"Switched to {choice}", foreground="green")
                 else:
@@ -157,17 +161,22 @@ class MultiPhoneSwitcher(tk.Tk):
             return
 
         self.capture_pipeline = pipeline
-        self.null_sink_manager.set_active_source(
-            initial_device.get('source_name'),
-            initial_device.get('device_mac'),
-        )
         null_sink_ready = self.null_sink_manager.setup()
+        if null_sink_ready:
+            all_source_names = [
+                dev.get('source_name') for dev in self.bt_devices
+                if dev.get('source_name')
+            ]
+            self.null_sink_manager.silence_sources(
+                all_source_names,
+                initial_device.get('source_name'),
+            )
 
         self.start_stop_btn.config(text="Stop Hub")
-        if null_sink_ready:
-            self.status_label.config(text=f"Hub Active. Playing from {initial_device['description']}", foreground="green")
-        else:
-            self.status_label.config(text=f"Hub Active. Playing from {initial_device['description']} (muting disabled)", foreground="orange")
+        self.status_label.config(
+            text=f"Hub Active. Playing from {initial_device['description']}",
+            foreground="green",
+        )
     
     def stop_hub(self):
         """Stops the capture and cleans up."""
