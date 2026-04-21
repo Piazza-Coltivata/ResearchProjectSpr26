@@ -105,6 +105,36 @@ def _list_bt_cards():
 
     return cards
 
+def _list_pipewire_bluez_input_nodes():
+    """Return active Bluetooth input/source nodes discovered from pw-link."""
+    try:
+        result = subprocess.run(
+            ["pw-link", "-iol"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return []
+
+    node_ports = {}
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("|") or " (" in line or ":" not in line:
+            continue
+
+        node_name, port_name = line.rsplit(":", 1)
+        node_ports.setdefault(node_name, set()).add(port_name)
+
+    active_nodes = []
+    for node_name, ports in node_ports.items():
+        if not node_name.startswith(("bluez_input.", "bluez_source.")):
+            continue
+        if any(port.startswith(("output_", "monitor_", "capture_")) for port in ports):
+            active_nodes.append(node_name)
+
+    return sorted(active_nodes)
+
 def _build_bt_description(source, card, device_mac):
     """Choose the best available user-facing label for a Bluetooth source."""
     card_properties = card.get("properties", {}) if card else {}
@@ -187,10 +217,16 @@ def get_bt_devices():
     """
     all_sources = list_devices("sources")
     all_sinks = list_devices("sinks")
-    bt_input_sources = [
-        source for source in all_sources
-        if source.get("name", "").startswith(("bluez_input.", "bluez_source."))
-    ]
+    sources_by_name = {
+        source.get("name"): dict(source)
+        for source in all_sources
+        if source.get("name")
+    }
+    bt_input_source_names = {
+        source_name for source_name in sources_by_name
+        if source_name.startswith(("bluez_input.", "bluez_source."))
+    }
+    bt_input_source_names.update(_list_pipewire_bluez_input_nodes())
     bt_output_sink_macs = {
         _extract_mac(sink.get("name", ""))
         for sink in all_sinks
@@ -206,13 +242,14 @@ def get_bt_devices():
     processed_devices = []
     seen_macs = set()
 
-    for source in bt_input_sources:
-        device_mac = _extract_mac(source.get("name", ""))
+    for source_name in sorted(bt_input_source_names):
+        source = dict(sources_by_name.get(source_name, {"name": source_name, "description": source_name}))
+        device_mac = _extract_mac(source_name)
         card = cards_by_mac.get(device_mac)
         source["device_mac"] = device_mac
         source["is_active_source"] = True
-        source["source_name"] = source.get("name")
-        source["monitor_source_name"] = source.get("name")
+        source["source_name"] = source_name
+        source["monitor_source_name"] = source_name
         source["description"] = _build_bt_description(source, card, device_mac)
         processed_devices.append(source)
         if device_mac:
@@ -247,6 +284,9 @@ def debug_print_all_audio():
     subprocess.run(["pactl", "list", "sinks", "short"])
     print("\n=== DEBUG: pactl list cards short ===")
     subprocess.run(["pactl", "list", "cards", "short"])
+    print("\n=== DEBUG: active Bluetooth input nodes from pw-link ===")
+    for node_name in _list_pipewire_bluez_input_nodes():
+        print(node_name)
 
 # Call this at the top-level when the module is run
 if __name__ == "__main__":

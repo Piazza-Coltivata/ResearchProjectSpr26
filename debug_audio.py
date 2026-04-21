@@ -33,6 +33,17 @@ def run_debug():
         print(f"ERROR: Could not run 'pactl list sources'. {e}")
     print("--- End of 'pactl list sources' ---\n")
 
+    print("--- 2b. Running 'pw-link -iol' ---")
+    try:
+        pw_link_output = subprocess.run(
+            ["pw-link", "-iol"],
+            capture_output=True, text=True, check=True
+        ).stdout
+        print(pw_link_output)
+    except Exception as e:
+        print(f"ERROR: Could not run 'pw-link -iol'. {e}")
+    print("--- End of 'pw-link -iol' ---\n")
+
 
     print("--- 3. Testing get_bt_devices() function ---")
     try:
