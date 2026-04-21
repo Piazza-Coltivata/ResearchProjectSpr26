@@ -146,11 +146,9 @@ class MultiPhoneSwitcher(tk.Tk):
         
         print(f"HUB_DEBUG: Starting capture with SOURCE: '{capture_source}' and SINK: '{capture_sink}'")
 
-        # Unconditionally unmute source and sink before starting.
-        # PipeWire persists mute state across BT reconnections (including when
-        # the suffix changes e.g. .2 -> .4), so we always force-unmute both.
-        subprocess.run(["pactl", "set-source-mute", capture_source, "0"],
-                       capture_output=True, text=True)
+        # Re-enable source card profile if it was silenced by a previous watcher
+        # cycle, then unmute the sink (our pause mechanism).
+        self.null_sink_manager.set_active_source(capture_source)
         subprocess.run(["pactl", "set-sink-mute", capture_sink, "0"],
                        capture_output=True, text=True)
 

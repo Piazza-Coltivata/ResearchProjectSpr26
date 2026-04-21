@@ -11,6 +11,17 @@ import audio_utils
 # The 'w' mode means it's overwritten each time the app starts
 error_log_file = open("pipeline_errors.log", "w")
 
+
+def _source_name_to_card(source_name):
+    """Convert 'bluez_input.10_A2_D3_EE_BB_2A.2' -> 'bluez_card.10_A2_D3_EE_BB_2A'."""
+    for prefix in ("bluez_input.", "bluez_source."):
+        if source_name.startswith(prefix):
+            suffix = source_name[len(prefix):]
+            parts = suffix.rsplit(".", 1)
+            mac = parts[0] if len(parts) == 2 and parts[1].isdigit() else suffix
+            return f"bluez_card.{mac}"
+    return None
+
 def log_available_ports():
     try:
         result = subprocess.run(["pw-link", "-iol"], capture_output=True, text=True)
@@ -255,13 +266,25 @@ class NullSinkManager:
     def __init__(self):
         self._active_source_name = None
         self._active_sink_name = None
-        self._muted_sources = set()   # track what we muted so we can unmute on teardown
+        self._silenced_cards = set()   # cards set to 'off' profile by the watcher
         self._watching = False
         self._watcher_thread = None
 
     def set_active_source(self, source_name):
-        """Update the currently active source. Unmuting is handled by start_hub()."""
+        """Switch the protected source. Re-enables the card profile if we had silenced it."""
         self._active_source_name = source_name
+        if not source_name:
+            return
+        card_name = _source_name_to_card(source_name)
+        if card_name and card_name in self._silenced_cards:
+            result = subprocess.run(
+                ["pactl", "set-card-profile", card_name, "a2dp_source"],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                self._silenced_cards.discard(card_name)
+                print(f"Re-enabled {card_name} profile for active source.")
+                time.sleep(0.5)  # allow profile negotiation to settle
 
     def start_watcher(self, active_source_name, active_sink_name):
         """Start background thread that keeps non-active BT sources muted."""
@@ -278,17 +301,6 @@ class NullSinkManager:
         if self._watcher_thread:
             self._watcher_thread.join(timeout=3)
             self._watcher_thread = None
-
-    def _set_mute(self, source_name, muted):
-        val = "1" if muted else "0"
-        result = subprocess.run(
-            ["pactl", "set-source-mute", source_name, val],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
-            print(f"MUTE: {'Muted' if muted else 'Unmuted'} {source_name}")
-        else:
-            print(f"MUTE: Failed on {source_name}: {result.stderr.strip()}")
 
     def _watcher_loop(self):
         import audio_utils as _au
@@ -317,18 +329,26 @@ class NullSinkManager:
 
                 for source_name in bt_sources:
                     if source_name == self._active_source_name:
-                        # Ensure active source stays unmuted
-                        if source_name in self._muted_sources:
-                            self._set_mute(source_name, False)
-                            self._muted_sources.discard(source_name)
                         continue
                     if sink_mac and _au._extract_mac(source_name) == sink_mac:
                         print(f"  WATCHER: Skipping {source_name} (speaker's own mic)")
                         continue
-                    # Mute this non-active source (idempotent — pactl ignores if already muted)
-                    if source_name not in self._muted_sources:
-                        self._set_mute(source_name, True)
-                        self._muted_sources.add(source_name)
+
+                    # Non-active BT source — terminate its A2DP stream by setting
+                    # its card profile to off.  This frees BT bandwidth immediately
+                    # and prevents WirePlumber from re-routing it.
+                    card_name = _source_name_to_card(source_name)
+                    if not card_name:
+                        continue
+                    print(f"  WATCHER: Silencing interloper {source_name} -> {card_name}")
+                    r = subprocess.run(
+                        ["pactl", "set-card-profile", card_name, "off"],
+                        capture_output=True, text=True,
+                    )
+                    if r.returncode == 0:
+                        self._silenced_cards.add(card_name)
+                    else:
+                        print(f"  WATCHER: Could not silence {card_name}: {r.stderr.strip()}")
 
                 check_active_links(self._active_sink_name)
             except Exception as exc:
@@ -351,8 +371,13 @@ class NullSinkManager:
         return True
 
     def teardown(self):
-        """Stop watcher and unmute any non-active sources the watcher had muted."""
+        """Stop watcher and restore any cards we set to 'off' profile."""
         self.stop_watcher()
-        for source_name in list(self._muted_sources):
-            self._set_mute(source_name, False)
-        self._muted_sources.clear()
+        for card_name in list(self._silenced_cards):
+            r = subprocess.run(
+                ["pactl", "set-card-profile", card_name, "a2dp_source"],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                print(f"Restored {card_name} to a2dp_source.")
+        self._silenced_cards.clear()
