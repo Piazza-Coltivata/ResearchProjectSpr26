@@ -29,9 +29,14 @@ class CapturePipeline:
     def __init__(self, source_name, sink_name):
         """
         Creates links between the given source and sink for both FL and FR channels.
+        Prevents self-linking (source == sink).
         """
-        self.source_name = source_name  # Should be e.g. bluez_output.74_DF_3A_3E_2D_2D.1
+        self.source_name = source_name
         self.sink_name = sink_name
+        if self.source_name == self.sink_name:
+            print(f"Skipping self-linking for {self.source_name}")
+            self.link_ports = []
+            return
         self.link_ports = [
             (f"{self.source_name}:monitor_FL", f"{self.sink_name}:playback_FL"),
             (f"{self.source_name}:monitor_FR", f"{self.sink_name}:playback_FR")

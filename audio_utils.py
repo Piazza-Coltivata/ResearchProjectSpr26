@@ -133,14 +133,16 @@ def get_bt_devices():
         if not ensure_a2dp_sink(device["name"]):
             continue
         device_mac = device.get("properties", {}).get("device.string", "")
-        # Print all properties for debugging
-        print(f"DEBUG: Device properties for {device.get('name')}: {device.get('properties')}")
+        # Print the entire device dictionary for debugging
+        print(f"DEBUG: Full device info: {device}")
         # Use a more descriptive name for the device
         alias = device.get("properties", {}).get("device.alias", "")
         if alias:
             device["description"] = f"{alias} ({device_mac})"
         else:
-            device["description"] = f"BT Device {device_mac}"
+            # Format MAC address for readability (XX:XX:XX:XX:XX:XX)
+            mac = device_mac.replace('_', ':').replace('-', ':')
+            device["description"] = f"BT Device {mac}"
         # Find the corresponding monitor source by matching the MAC address string
         matching_source = next((s for s in bt_monitor_sources if device_mac in s.get("name", "")), None)
         device["monitor_source_name"] = matching_source["name"] if matching_source else None
