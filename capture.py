@@ -11,6 +11,17 @@ import audio_utils
 # The 'w' mode means it's overwritten each time the app starts
 error_log_file = open("pipeline_errors.log", "w")
 
+def log_available_ports():
+    try:
+        result = subprocess.run(["pw-link", "-iol"], capture_output=True, text=True)
+        error_log_file.write("\n--- Available PipeWire Ports (pw-link -iol) ---\n")
+        error_log_file.write(result.stdout)
+        error_log_file.write("\n--- End of Ports ---\n")
+        error_log_file.flush()
+    except Exception as e:
+        error_log_file.write(f"\nERROR: Could not run pw-link -iol: {e}\n")
+        error_log_file.flush()
+
 class CapturePipeline:
     """
     Manages a PipeWire link between a source and a sink using pw-link.
@@ -25,9 +36,12 @@ class CapturePipeline:
             (f"{self.source_name}:monitor_FL", f"{self.sink_name}:playback_FL"),
             (f"{self.source_name}:monitor_FR", f"{self.sink_name}:playback_FR")
         ]
+        log_available_ports()
         for src_port, sink_port in self.link_ports:
+            print(f"DEBUG: Attempting to link {src_port} -> {sink_port}")
+            error_log_file.write(f"Attempting to link {src_port} -> {sink_port}\n")
+            error_log_file.flush()
             command = ["pw-link", src_port, sink_port]
-            print(f"DEBUG: Running PipeWire link command: {' '.join(command)}")
             proc = subprocess.Popen(
                 command,
                 stdout=subprocess.DEVNULL,
@@ -38,12 +52,11 @@ class CapturePipeline:
                 print(f"ERROR: pw-link command failed for {src_port} -> {sink_port} with exit code {proc.returncode}. Check pipeline_errors.log")
 
     def stop(self):
-        """
-        Destroys the links between the source and sink for both FL and FR channels.
-        """
         for src_port, sink_port in self.link_ports:
+            print(f"DEBUG: Attempting to unlink {src_port} -> {sink_port}")
+            error_log_file.write(f"Attempting to unlink {src_port} -> {sink_port}\n")
+            error_log_file.flush()
             command = ["pw-link", "-d", src_port, sink_port]
-            print(f"DEBUG: Running PipeWire unlink command: {' '.join(command)}")
             proc = subprocess.Popen(
                 command,
                 stdout=subprocess.DEVNULL,
