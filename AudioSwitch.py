@@ -136,7 +136,7 @@ class MultiPhoneSwitcher(tk.Tk):
         self.update_idletasks()
         self.null_sink_manager.setup()
 
-        capture_source = initial_device['name']  # Use device name, not monitor_source_name
+        capture_source = initial_device['sink_name']  # Use bluez_output sink name for source
         capture_sink = initial_sink['name']
         
         print(f"HUB_DEBUG: Starting capture with SOURCE: '{capture_source}' and SINK: '{capture_sink}'")

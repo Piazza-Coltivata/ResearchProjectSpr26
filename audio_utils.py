@@ -98,13 +98,13 @@ def ensure_a2dp_sink(card_name):
 def get_bt_devices():
     """
     Return a list of all connected Bluetooth devices (cards), active or not.
-    For each device, it also finds the corresponding .monitor source if it exists.
+    For each device, it also finds the corresponding .monitor source and bluez_output sink if it exists.
     """
-    # 1. Get all sources and filter for BT monitor sources first
     all_sources = list_devices("sources")
+    all_sinks = list_devices("sinks")
     bt_monitor_sources = [s for s in all_sources if "bluez" in s.get("name", "") and ".monitor" in s.get("name", "")]
+    bt_output_sinks = [s for s in all_sinks if "bluez_output" in s.get("name", "")]
 
-    # 2. Get all BT cards
     cards_result = _pactl("list", "cards")
     if not cards_result:
         return []
@@ -128,23 +128,17 @@ def get_bt_devices():
     if current_card and "bluez_card" in current_card.get("name", ""):
         devices.append(current_card)
 
-    # 3. Combine the data correctly
     processed_devices = []
     for device in devices:
-        # Ensure it's a device we want to control
         if not ensure_a2dp_sink(device["name"]):
             continue
-
-        device_mac = device.get("properties", {}).get("device.string", "") # e.g., 74_DF_3A_3E_2D_2D
+        device_mac = device.get("properties", {}).get("device.string", "")
         device["description"] = device.get("properties", {}).get("device.alias", f"BT Device {device_mac}")
-        
         # Find the corresponding monitor source by matching the MAC address string
-        matching_source = next(
-            (s for s in bt_monitor_sources if device_mac in s.get("name", "")),
-            None
-        )
-        
+        matching_source = next((s for s in bt_monitor_sources if device_mac in s.get("name", "")), None)
         device["monitor_source_name"] = matching_source["name"] if matching_source else None
+        # Find the corresponding bluez_output sink by matching the MAC address string
+        matching_sink = next((s for s in bt_output_sinks if device_mac in s.get("name", "")), None)
+        device["sink_name"] = matching_sink["name"] if matching_sink else None
         processed_devices.append(device)
-
     return processed_devices
