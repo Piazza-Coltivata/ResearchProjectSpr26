@@ -44,8 +44,9 @@ def run_debug():
             for i, device in enumerate(bt_devices):
                 print(f"\n--- Device {i+1} ---")
                 print(f"  Description: {device.get('description')}")
-                print(f"  Card Name: {device.get('name')}")
-                print(f"  Monitor Source: {device.get('monitor_source_name')}")
+                print(f"  Device Name: {device.get('name')}")
+                print(f"  Source Name: {device.get('source_name')}")
+                print(f"  Device MAC: {device.get('device_mac')}")
                 print(f"  All Properties: {device.get('properties')}")
 
     except Exception as e:

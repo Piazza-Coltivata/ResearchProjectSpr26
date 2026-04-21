@@ -57,17 +57,19 @@ class MultiPhoneSwitcher(tk.Tk):
     def refresh_lists(self):
         """Refreshes the list of available Bluetooth devices and speaker sinks."""
         self.bt_devices = get_bt_devices()
-        # Show ALL sinks, including bluez (Bluetooth) sinks
-        self.speaker_sinks = list_devices("sinks")
+        self.speaker_sinks = [
+            sink for sink in list_devices("sinks")
+            if sink.get("name") != self.null_sink_manager.NULL_SINK_NAME
+        ]
 
         bt_names = [dev['description'] for dev in self.bt_devices]
         speaker_names = [f"{s['description']}" for s in self.speaker_sinks]
 
-        self.device_menu['values'] = bt_names if bt_names else ["No BT devices found"]
+        self.device_menu['values'] = bt_names if bt_names else ["No BT inputs found"]
         self.speaker_menu['values'] = speaker_names if speaker_names else ["No speakers found"]
 
         if not bt_names:
-            self.device_var.set("No BT devices found")
+            self.device_var.set("No BT inputs found")
         else:
             if self.device_var.get() not in bt_names:
                 self.device_var.set(bt_names[0])
@@ -83,13 +85,16 @@ class MultiPhoneSwitcher(tk.Tk):
     def on_source_select(self, event=None):
         """Callback when a new source is selected from the dropdown."""
         choice = self.device_var.get()
-        if self.capture_pipeline and self.capture_pipeline._running:
+        if self.capture_pipeline and self.capture_pipeline.is_running():
             selected_device = next((dev for dev in self.bt_devices if dev['description'] == choice), None)
-            if selected_device and selected_device['monitor_source_name']:
-                self.capture_pipeline.switch_source(selected_device['monitor_source_name'])
-                self.status_label.config(text=f"Switched to {choice}", foreground="green")
+            if selected_device and selected_device.get('source_name'):
+                if self.capture_pipeline.switch_source(selected_device['source_name']):
+                    self.status_label.config(text=f"Switched to {choice}", foreground="green")
+                else:
+                    error = self.capture_pipeline.last_error or f"Could not switch to {choice}."
+                    self.status_label.config(text=f"Error: {error}", foreground="red")
             elif selected_device:
-                self.status_label.config(text=f"Error: {choice} is not playing audio.", foreground="orange")
+                self.status_label.config(text=f"Error: {choice} is connected but not streaming audio.", foreground="orange")
             else:
                 self.status_label.config(text=f"Error: Could not find device for {choice}", foreground="red")
 
@@ -127,24 +132,34 @@ class MultiPhoneSwitcher(tk.Tk):
             print("HUB_DEBUG: ERROR - Could not find initial device or sink object.")
             return
             
-        if not initial_device.get('monitor_source_name'):
-            self.status_label.config(text=f"Error: {initial_device['description']} is not playing audio.", foreground="red")
-            print(f"HUB_DEBUG: ERROR - Device '{initial_device['description']}' has no monitor source.")
+        if not initial_device.get('source_name'):
+            self.status_label.config(text=f"Error: {initial_device['description']} is connected but not streaming audio.", foreground="red")
+            print(f"HUB_DEBUG: ERROR - Device '{initial_device['description']}' has no active source node.")
             return
 
-        self.status_label.config(text="Starting exclusive mode...", foreground="yellow")
+        self.status_label.config(text="Starting hub...", foreground="yellow")
         self.update_idletasks()
-        self.null_sink_manager.setup()
 
-        capture_source = initial_device['sink_name']  # Use bluez_output sink name for source
+        capture_source = initial_device['source_name']
         capture_sink = initial_sink['name']
         
         print(f"HUB_DEBUG: Starting capture with SOURCE: '{capture_source}' and SINK: '{capture_sink}'")
 
-        self.capture_pipeline = CapturePipeline(capture_source, capture_sink)
+        pipeline = CapturePipeline(capture_source, capture_sink)
+        if not pipeline.is_running():
+            error = pipeline.last_error or "Could not create PipeWire links."
+            self.status_label.config(text=f"Error: {error}", foreground="red")
+            print(f"HUB_DEBUG: ERROR - {error}")
+            return
+
+        self.capture_pipeline = pipeline
+        null_sink_ready = self.null_sink_manager.setup()
 
         self.start_stop_btn.config(text="Stop Hub")
-        self.status_label.config(text=f"Hub Active. Playing from {initial_device['description']}", foreground="green")
+        if null_sink_ready:
+            self.status_label.config(text=f"Hub Active. Playing from {initial_device['description']}", foreground="green")
+        else:
+            self.status_label.config(text=f"Hub Active. Playing from {initial_device['description']} (muting disabled)", foreground="orange")
     
     def stop_hub(self):
         """Stops the capture and cleans up."""

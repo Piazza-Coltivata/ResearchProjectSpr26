@@ -26,54 +26,166 @@ class CapturePipeline:
     """
     Manages a PipeWire link between a source and a sink using pw-link.
     """
+    STEREO_SOURCE_PORTS = (
+        ("output_FL", "output_FR"),
+        ("monitor_FL", "monitor_FR"),
+        ("capture_FL", "capture_FR"),
+    )
+    MONO_SOURCE_PORTS = ("output_MONO", "monitor_MONO", "capture_MONO")
+
     def __init__(self, source_name, sink_name):
         """
-        Creates links between the given source and sink for both FL and FR channels.
-        Prevents self-linking (source == sink).
+        Creates links between the given source and sink using the ports that exist.
         """
         self.source_name = source_name
         self.sink_name = sink_name
-        if self.source_name == self.sink_name:
-            print(f"Skipping self-linking for {self.source_name}")
-            self.link_ports = []
+        self.link_ports = []
+        self._running = False
+        self.last_error = None
+
+        if not self.source_name or not self.sink_name:
+            self.last_error = "Missing source or sink selection."
+            print(f"ERROR: {self.last_error}")
             return
-        self.link_ports = [
-            (f"{self.source_name}:monitor_FL", f"{self.sink_name}:playback_FL"),
-            (f"{self.source_name}:monitor_FR", f"{self.sink_name}:playback_FR")
-        ]
-        log_available_ports()
-        for src_port, sink_port in self.link_ports:
-            print(f"DEBUG: Attempting to link {src_port} -> {sink_port}")
-            error_log_file.write(f"Attempting to link {src_port} -> {sink_port}\n")
+
+        if self.source_name == self.sink_name:
+            self.last_error = "Source and sink cannot be the same node."
+            print(f"ERROR: {self.last_error}")
+            return
+
+        self._running = self._link_source_to_sink(self.source_name, self.sink_name)
+
+    def _get_available_ports(self):
+        try:
+            result = subprocess.run(["pw-link", "-iol"], capture_output=True, text=True, check=True)
+        except Exception as error:
+            self.last_error = f"Could not inspect PipeWire ports: {error}"
+            error_log_file.write(f"ERROR: {self.last_error}\n")
             error_log_file.flush()
-            command = ["pw-link", src_port, sink_port]
-            proc = subprocess.Popen(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=error_log_file
-            )
-            proc.communicate()
-            if proc.returncode != 0:
-                print(f"ERROR: pw-link command failed for {src_port} -> {sink_port} with exit code {proc.returncode}. Check pipeline_errors.log")
+            return set()
+
+        error_log_file.write("\n--- Available PipeWire Ports (pw-link -iol) ---\n")
+        error_log_file.write(result.stdout)
+        error_log_file.write("\n--- End of Ports ---\n")
+        error_log_file.flush()
+
+        ports = set()
+        for raw_line in result.stdout.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("|") or " (" in line:
+                continue
+            ports.add(line)
+        return ports
+
+    def _resolve_link_ports(self, source_name, sink_name, ports):
+        sink_left = f"{sink_name}:playback_FL"
+        sink_right = f"{sink_name}:playback_FR"
+        if sink_left not in ports or sink_right not in ports:
+            self.last_error = f"Speaker ports were not found for {sink_name}."
+            return []
+
+        for left_suffix, right_suffix in self.STEREO_SOURCE_PORTS:
+            source_left = f"{source_name}:{left_suffix}"
+            source_right = f"{source_name}:{right_suffix}"
+            if source_left in ports and source_right in ports:
+                return [(source_left, sink_left), (source_right, sink_right)]
+
+        for mono_suffix in self.MONO_SOURCE_PORTS:
+            source_mono = f"{source_name}:{mono_suffix}"
+            if source_mono in ports:
+                return [(source_mono, sink_left), (source_mono, sink_right)]
+
+        self.last_error = f"No compatible source ports were found for {source_name}."
+        return []
+
+    def _run_link_command(self, source_port, sink_port, disconnect=False):
+        action = "unlink" if disconnect else "link"
+        print(f"DEBUG: Attempting to {action} {source_port} -> {sink_port}")
+        error_log_file.write(f"Attempting to {action} {source_port} -> {sink_port}\n")
+        error_log_file.flush()
+
+        command = ["pw-link"]
+        if disconnect:
+            command.append("-d")
+        command.extend([source_port, sink_port])
+
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=error_log_file
+        )
+        proc.communicate()
+        return proc.returncode == 0
+
+    def _unlink_links(self, links):
+        for source_port, sink_port in links:
+            if not self._run_link_command(source_port, sink_port, disconnect=True):
+                print(f"ERROR: pw-link -d failed for {source_port} -> {sink_port}. Check pipeline_errors.log")
+
+    def _link_source_to_sink(self, source_name, sink_name):
+        ports = self._get_available_ports()
+        if not ports:
+            if not self.last_error:
+                self.last_error = "No PipeWire ports were available."
+            return False
+
+        requested_links = self._resolve_link_ports(source_name, sink_name, ports)
+        if not requested_links:
+            error_log_file.write(f"ERROR: {self.last_error}\n")
+            error_log_file.flush()
+            return False
+
+        created_links = []
+        for source_port, sink_port in requested_links:
+            if self._run_link_command(source_port, sink_port):
+                created_links.append((source_port, sink_port))
+                continue
+
+            self.last_error = f"Failed to link {source_port} -> {sink_port}."
+            self._unlink_links(created_links)
+            self.link_ports = []
+            return False
+
+        self.source_name = source_name
+        self.sink_name = sink_name
+        self.link_ports = created_links
+        self.last_error = None
+        return True
+
+    def switch_source(self, source_name):
+        if not source_name:
+            self.last_error = "The selected phone is not currently streaming audio."
+            return False
+        if not self._running:
+            self.last_error = "The hub is not running."
+            return False
+        if source_name == self.source_name:
+            return True
+
+        previous_source = self.source_name
+        previous_links = list(self.link_ports)
+        self._unlink_links(previous_links)
+        self.link_ports = []
+
+        if self._link_source_to_sink(source_name, self.sink_name):
+            self._running = True
+            return True
+
+        failed_error = self.last_error
+        if previous_links:
+            self._link_source_to_sink(previous_source, self.sink_name)
+        self._running = bool(self.link_ports)
+        self.last_error = failed_error
+        return False
 
     def stop(self):
-        for src_port, sink_port in self.link_ports:
-            print(f"DEBUG: Attempting to unlink {src_port} -> {sink_port}")
-            error_log_file.write(f"Attempting to unlink {src_port} -> {sink_port}\n")
-            error_log_file.flush()
-            command = ["pw-link", "-d", src_port, sink_port]
-            proc = subprocess.Popen(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=error_log_file
-            )
-            proc.communicate()
-            if proc.returncode != 0:
-                print(f"ERROR: pw-link -d command failed for {src_port} -> {sink_port} with exit code {proc.returncode}. Check pipeline_errors.log")
+        self._unlink_links(self.link_ports)
+        self.link_ports = []
+        self._running = False
         print("PipeWire links stopped.")
 
     def is_running(self):
-        return True # Simplified check
+        return self._running
 
 class NullSinkManager:
     """
@@ -130,18 +242,46 @@ class NullSinkManager:
         if self._monitor_thread:
             self._monitor_thread.join(timeout=2)
 
+    def _list_sink_input_blocks(self):
+        """Split `pactl list sink-inputs` output into per-stream blocks."""
+        try:
+            result = subprocess.run(
+                ["pactl", "list", "sink-inputs"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return []
+
+        blocks = []
+        current_block = []
+        for line in result.stdout.splitlines():
+            if line.startswith("Sink Input #"):
+                if current_block:
+                    blocks.append("\n".join(current_block))
+                current_block = [line]
+            elif current_block:
+                current_block.append(line)
+
+        if current_block:
+            blocks.append("\n".join(current_block))
+
+        return blocks
+
     def _monitor_loop(self):
         """Periodically moves any new Bluetooth audio streams to the null sink."""
         while self._monitoring:
             try:
-                inputs_result = subprocess.run(["pactl", "list", "short", "sink-inputs"], capture_output=True, text=True, check=True)
-                for line in inputs_result.stdout.splitlines():
-                    parts = line.split()
-                    stream_id = parts[0]
-                    # Check if it's a bluetooth stream before moving
-                    props_result = subprocess.run(["pactl", "list", "sink-inputs"], capture_output=True, text=True, check=True)
-                    if f"Sink Input #{stream_id}" in props_result.stdout and "bluez" in props_result.stdout:
-                         subprocess.run(["pactl", "move-sink-input", stream_id, self.NULL_SINK_NAME])
+                for block in self._list_sink_input_blocks():
+                    if "bluez" not in block.lower():
+                        continue
+                    stream_id = block.splitlines()[0].split("#", 1)[1].strip()
+                    subprocess.run(
+                        ["pactl", "move-sink-input", stream_id, self.NULL_SINK_NAME],
+                        capture_output=True,
+                        text=True,
+                    )
             except (subprocess.CalledProcessError, FileNotFoundError):
                 pass # pactl might fail if no streams exist
             time.sleep(2)
