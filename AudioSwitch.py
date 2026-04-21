@@ -46,13 +46,9 @@ class MultiPhoneSwitcher(tk.Tk):
         self.status_label = ttk.Label(self, text="Status: Initializing...", foreground="gray")
         self.status_label.pack(pady=10)
 
-        # Main Action Button
-        self.start_stop_btn = ttk.Button(self, text="Start Hub", command=self.toggle_hub)
-        self.start_stop_btn.pack(pady=20)
-
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.refresh_lists()
-        self.status_label.config(text="Status: Ready. Press 'Start Hub'.")
+        self.after(300, self._try_auto_start)
 
     def refresh_lists(self):
         """Refreshes the list of available Bluetooth devices and speaker sinks."""
@@ -86,6 +82,7 @@ class MultiPhoneSwitcher(tk.Tk):
         """Callback when a new source is selected from the dropdown."""
         choice = self.device_var.get()
         if not (self.capture_pipeline and self.capture_pipeline.is_running()):
+            self.start_hub()
             return
 
         selected_device = next((dev for dev in self.bt_devices if dev['description'] == choice), None)
@@ -137,11 +134,12 @@ class MultiPhoneSwitcher(tk.Tk):
         self.status_label.config(text=f"Output set to {choice}", foreground="cyan")
 
 
-    def toggle_hub(self):
-        if self.capture_pipeline and self.capture_pipeline.is_running():
-            self.stop_hub()
-        else:
+    def _try_auto_start(self):
+        """Auto-start the hub on launch if devices and a speaker are available."""
+        if self.bt_devices and self.speaker_sinks:
             self.start_hub()
+        else:
+            self.status_label.config(text="No devices found. Connect a phone and refresh.", foreground="orange")
 
     def start_hub(self):
         """Starts the exclusive capture mode."""
@@ -165,9 +163,34 @@ class MultiPhoneSwitcher(tk.Tk):
             return
             
         if not initial_device.get('source_name'):
-            self.status_label.config(text=f"Error: {initial_device['description']} is connected but not streaming audio.", foreground="red")
-            print(f"HUB_DEBUG: ERROR - Device '{initial_device['description']}' has no active source node.")
-            return
+            card_name = initial_device.get('name', '')
+            if card_name.startswith('bluez_card.'):
+                self.status_label.config(text=f"Activating {initial_device['description']}...", foreground="yellow")
+                self.update_idletasks()
+                subprocess.run(
+                    ["pactl", "set-card-profile", card_name, "a2dp_source"],
+                    capture_output=True, text=True,
+                )
+                for _ in range(5):
+                    time.sleep(1)
+                    fresh = get_bt_devices()
+                    found = next(
+                        (d for d in fresh
+                         if d['device_mac'] == initial_device['device_mac'] and d.get('source_name')),
+                        None,
+                    )
+                    if found:
+                        initial_device = found
+                        self.bt_devices = fresh
+                        self.device_menu['values'] = [d['description'] for d in fresh]
+                        break
+            if not initial_device.get('source_name'):
+                self.status_label.config(
+                    text=f"{initial_device['description']} — play audio on the device first.",
+                    foreground="orange",
+                )
+                print(f"HUB_DEBUG: ERROR - Device '{initial_device['description']}' has no active source node.")
+                return
 
         self.status_label.config(text="Starting hub...", foreground="yellow")
         self.update_idletasks()
@@ -210,7 +233,6 @@ class MultiPhoneSwitcher(tk.Tk):
                 initial_sink.get('name'),
             )
 
-        self.start_stop_btn.config(text="Stop Hub")
         self.status_label.config(
             text=f"Hub Active. Playing from {initial_device['description']}",
             foreground="green",
@@ -248,7 +270,6 @@ class MultiPhoneSwitcher(tk.Tk):
                 print(f"Warning: could not mute sink {sink_name}: {result.stderr.strip()}")
             self.capture_pipeline.stop()  # logical stop; links remain
             # Keep self.capture_pipeline set so on_closing() can restore the sink.
-        self.start_stop_btn.config(text="Start Hub")
         self.status_label.config(text="Status: Hub Paused.", foreground="gray")
 
     def on_closing(self):
