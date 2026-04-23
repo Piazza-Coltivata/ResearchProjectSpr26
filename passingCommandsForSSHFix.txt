@@ -1,11 +1,3 @@
-ls /lib/firmware/iwlwifi-ty*
-
-
-sudo apt install --reinstall firmware-iwlwifi
-ls /lib/firmware/iwlwifi-ty*
-
-
-wget https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/iwlwifi-ty-a0-gf-a0-77.ucode -P /lib/firmware/
-sudo modprobe -r iwlwifi
-sudo modprobe iwlwifi
-dmesg | grep -i iwl | tail -20
+sudo nmcli con add type wifi ifname wlan1 con-name "ax210-wifi" ssid "YourSSID" \
+  wifi-sec.key-mgmt wpa-psk wifi-sec.psk "YourPassword"
+sudo nmcli con up "ax210-wifi"
